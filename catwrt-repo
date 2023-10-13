@@ -1,120 +1,99 @@
-###
- # @Author: 2860950766@qq.com
- # @Date: 2023-10-12 22:25:55
- # @LastEditors: 2860950766@qq.com
- # @LastEditTime: 2023-10-12 23:09:25
- # @FilePath: \undefinedd:\Git\catwrt-repo\catwrt-repo
-### 
 #!/bin/bash
+###
+# @Author: timochan
+# @Date: 2023-10-13 17:28:01
+# @LastEditors: timochan
+# @LastEditTime: 2023-10-13 20:13:44
+# @FilePath: /change-repo/change-repo
+###
+API_DONAME="api.miaoer.xyz"
+API_URL="https://${API_DONAME}/api/v2/snippets/catwrt/repo"
+MIRROR_FILE="/etc/opkg/distfeeds.conf"
+VERSION_FILE="/etc/catwrt_release"
 
-# TEST API
+local_error() {
+    echo "Local $1 get failed, please check your /etc/catwrt_release!"
+    exit 1
+}
+init() {
+    if [ ! -f ${VERSION_FILE} ]; then
+        local_error "version file"
+    fi
+    arch_local=$(grep 'arch' ${VERSION_FILE} | cut -d '=' -f 2)
+    version_local=$(grep 'version' ${VERSION_FILE} | cut -d '=' -f 2)
+    hash_local=$(grep 'hash' ${VERSION_FILE} | cut -d '=' -f 2)
 
-ping -c 1 api.miaoer.xyz > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-  echo "Cannot reach api.miaoer.xyz, please contact developer for support."
-  exit 1
-fi
+}
+ping_test() {
+    ping -c 1 ${API_DONAME} >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo "Error: Unable to connect to API server. Please check your network."
+        exit 1
+    fi
 
-# backup distfeeds
-if ! grep -q "catwrt" /etc/opkg/distfeeds.conf; then
-  cp /etc/opkg/distfeeds.conf /etc/opkg/distfeeds_o.conf
-fi
+}
+backup_file() {
+    if [ -f ${MIRROR_FILE} ]; then
+        mv ${MIRROR_FILE} ${MIRROR_FILE}.bak
+        echo "Backup ${MIRROR_FILE} to ${MIRROR_FILE}.bak"
+    fi
+}
+test_mirror() {
+    arch_self=$1
+    version_remote=$(curl ${API_URL} | jq -r ".$arch_self.version")
+    hash_remote=$(curl ${API_URL} | jq -r ".$arch_self.hash")
 
-# Downloads
-curl -s https://api.miaoer.xyz/api/v2/snippets/catwrt/repo > /tmp/catwrt-repo.json
+    if [ $? -ne 0 ] || [ -z "$version_remote" ] || [ -z "$hash_remote" ]; then
+        remote_error "version or hash"
+    fi
+}
 
-# use
-source /tmp/catwrt-repo.json
+speedtest_mirror() {
+    domains=($(curl -s ${API_URL} | jq -r '.server | to_entries[] | .value | select(startswith("https"))' | awk -F/ '{print $3}'))
+    fastest_response=999999
+    fastest_domain=""
+    port=443
 
-# arch
-read -p "Enter [1] for amd64 or [2] for mt798x: " arch_choice
+    for domain in "${domains[@]}"; do
+        response_time=$(tcping -c 1 $domain $port | grep -oP "(\d+\.\d+)")
+        response_time=$(awk -v n=$response_time 'BEGIN { printf "%.2f", n }')
+        fastest_response=$(awk -v n=$fastest_response 'BEGIN { printf "%.2f", n }')
+        if [ $(echo "${response_time} < ${fastest_response}" | bc -l) -eq 1 ]; then
+            fastest_response=${response_time}
+            fastest_domain=${domain}
+        fi
 
-if [ $arch_choice -eq 1 ]; then
-  arch_config=${amd64}
-elif [ $arch_choice -eq 2 ]; then
-  arch_config=${mt798x}
-else
-  echo "Invalid choice"
-  exit 1
-fi
+    done
 
-# Testing connection
-echo "Testing connection to sources..."
+    echo "Fast Mirror is: ${fastest_domain}"
+    echo "Response Time: ${fastest_response} ms"
 
-tcping -c 1 ${amd64[cfmain]} > /dev/null 2>&1 
-if [ $? -ne 0 ]; then
-  echo "Error: ${[cfmain]} unreachable."
-fi
+}
+replace_mirror() {
+    mirror_url="https://${fastest_domain}"
+    cat >"$MIRROR_FILE" <<EOF
+    src/gz openwrt_core ${mirror_url}/${arch_self}openwrt_core
+    src/gz openwrt_base ${mirror_url}/${arch_self}openwrt_base
+    src/gz openwrt_luci ${mirror_url}/${arch_self}openwrt_luci
+    src/gz openwrt_packages ${mirror_url}/${arch_self}openwrt_packages
+    src/gz openwrt_routing ${mirror_url}/${arch_self}openwrt_routing
+    src/gz openwrt_telephony ${mirror_url}/${arch_self}openwrt_telephony
+EOF
 
-tcping -c 1 ${amd64[vercel]} > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-  echo "Error: ${[vercel]} unreachable."
-fi
+}
+update() {
+    rm -f /var/lock/opkg.lock
+    opkg update
 
-tcping -c 1 ${amd64[netlify]} > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-  echo "Error: ${[netlify]} unreachable."
-fi
+}
+main() {
+    init
+    ping_test
+    test_mirror $arch_local
+    speedtest_mirror
+    backup_file
+    replace_mirror
+    update
 
-tcping -c 1 ${amd64[cfvercel]} > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-  echo "Error: ${[cfvercel]} unreachable."
-fi
-
-tcping -c 1 ${amd64[cfnetlify]} > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-  echo "Error: ${[cfnetlify]} unreachable."
-fi
-
-# Select software source
-PS3="Select software source: "
-select source in cfmain vercel netlify cfvercel cfnetlify local; do
-  break
-done
-
-# local
-if [ $source == "local" ]; then
-  read -p "Enter local software source url: " source
-else
-  source=${arch_config[$source]}
-fi
-
-# Update distfeeds
-if [ -f /etc/opkg/distfeeds_o.conf ]; then
-
-  read -p "Backup found. Replace sources? [Y/n] " confirm
-  if [ "$confirm" == "Y" ]; then
-    
-    cat > /etc/opkg/distfeeds.conf <<EOF
-       src/gz openwrt_core $source/${arch_config[openwrt_core]}  
-       src/gz openwrt_base $source/${arch_config[openwrt_base]}
-       src/gz openwrt_luci $source/${arch_config[openwrt_luci]}
-       src/gz openwrt_packages $source/${arch_config[openwrt_packages]}
-       src/gz openwrt_routing $source/${arch_config[openwrt_routing]}
-       src/gz openwrt_telephony $source/${arch_config[openwrt_telephony]}
-    EOF
-
-  else
-    rm -f /etc/opkg/distfeeds.conf
-  fi
-
-else
-
-  cat > /etc/opkg/distfeeds.conf <<EOF
-    src/gz openwrt_core $source/${arch_config[openwrt_core]}
-    src/gz openwrt_base $source/${arch_config[openwrt_base]}
-    src/gz openwrt_luci $source/${arch_config[openwrt_luci]}
-    src/gz openwrt_packages $source/${arch_config[openwrt_packages]}
-    src/gz openwrt_routing $source/${arch_config[openwrt_routing]}
-    src/gz openwrt_telephony $source/${arch_config[openwrt_telephony]}
-  EOF
-  
-fi 
-
-# opkg update
-
-rm -f /var/lock/opkg.lock
-opkg update
-
-echo "Software sources updated successfully!"
-echo "Enjoy!"
+}
+main
