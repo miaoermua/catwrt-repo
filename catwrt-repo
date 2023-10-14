@@ -40,8 +40,8 @@ backup_file() {
 }
 test_mirror() {
     arch_self=$1
-    version_remote=$(curl ${API_URL} | jq -r ".$arch_self.version")
-    hash_remote=$(curl ${API_URL} | jq -r ".$arch_self.hash")
+    version_remote=$(curl -s ${API_URL} | jq -r ".$arch_self.version")
+    hash_remote=$(curl -s ${API_URL} | jq -r ".$arch_self.hash")
 
     if [ $? -ne 0 ] || [ -z "$version_remote" ] || [ -z "$hash_remote" ]; then
         remote_error "version or hash"
